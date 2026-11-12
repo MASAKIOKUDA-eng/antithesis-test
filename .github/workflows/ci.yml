@@ -1,0 +1,57 @@
+# Static checks + free local verification. Needs no AWS or Antithesis access.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  infra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      CDK_DEFAULT_REGION: ap-northeast-1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npx tsc --noEmit
+      - run: npx jest
+      # cdk-nag runs inside synth; any unacknowledged finding fails here.
+      - run: npx cdkd synth > /dev/null
+
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        bug_mode: [none, non_atomic_transfer]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: python syntax
+        run: python3 -m py_compile sut/bank/app.py sut/workload/entrypoint.py sut/workload/lib/*.py sut/workload/test/v1/bank/*.py sut/tools/*.py
+      - name: local smoke (bug mode ${{ matrix.bug_mode }})
+        env:
+          BANK_BUG_MODE: ${{ matrix.bug_mode }}
+        run: ./scripts/local-smoke.sh

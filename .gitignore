@@ -1,0 +1,12 @@
+# Credentials must never be committed (Antithesis registry key, API keys, ...)
+*.key.json
+*.pem
+*.key
+.env.local
+*.secret*
+
+# Local outputs
+smoke-output/
+__pycache__/
+*.pyc
+.DS_Store

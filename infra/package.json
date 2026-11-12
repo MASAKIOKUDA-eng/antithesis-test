@@ -1,0 +1,33 @@
+{
+  "name": "antithesis-verification-infra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AWS infrastructure (CDK) for verifying Antithesis; deployed with cdkd",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "jest",
+    "synth": "cdkd synth",
+    "diff": "cdkd diff",
+    "deploy": "cdkd deploy",
+    "destroy": "cdkd destroy"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.276.0",
+    "cdk-nag": "3.0.2",
+    "constructs": "10.8.1",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@cdkd/cli": "0.341.0",
+    "@types/jest": "30.0.0",
+    "@types/node": "22.20.5",
+    "jest": "30.5.2",
+    "ts-jest": "29.4.15",
+    "ts-node": "10.9.2",
+    "typescript": "5.9.3"
+  }
+}

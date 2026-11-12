@@ -1,0 +1,11 @@
+# Local-only override (NOT shipped to Antithesis): makes the SDK write its
+# assertion records to a JSONL file so scripts/local-smoke.sh can judge them.
+services:
+  workload:
+    environment:
+      ANTITHESIS_SDK_LOCAL_OUTPUT: /sdk-output/sdk.jsonl
+    volumes:
+      - sdk-output:/sdk-output
+
+volumes:
+  sdk-output: {}

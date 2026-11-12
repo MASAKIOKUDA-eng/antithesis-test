@@ -1,0 +1,115 @@
+# CodeBuild buildspec (inlined into the project by CDK at synth time).
+#
+# Keeping it in infra/ (not in the uploaded source zip) means a tampered
+# source archive cannot change how secrets are fetched or where images go.
+#
+# Flow:
+#   pre_build : validate inputs, log in to ECR
+#   build     : docker build SUT + workload -> local smoke test (free) ->
+#               build config image
+#   post_build: (only if build succeeded) push to ECR; if ANTITHESIS_ENABLED,
+#               fetch Antithesis credentials, push to the Antithesis registry
+#               and launch a test run via the webhook API
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    DOCKER_BUILDKIT: "1"
+
+phases:
+  pre_build:
+    commands:
+      - set -euo pipefail
+      # ---- Input validation (env vars can be overridden at start-build) ----
+      - '[[ "${BANK_BUG_MODE}" =~ ^(none|non_atomic_transfer)$ ]] || { echo "invalid BANK_BUG_MODE"; exit 1; }'
+      - '[[ "${ANTITHESIS_ENABLED}" =~ ^(true|false)$ ]] || { echo "invalid ANTITHESIS_ENABLED"; exit 1; }'
+      - '[[ "${ANTITHESIS_DURATION_MINUTES}" =~ ^[0-9]{1,4}$ ]] || { echo "invalid ANTITHESIS_DURATION_MINUTES"; exit 1; }'
+      - '[[ "${SMOKE_ROUNDS}" =~ ^[0-9]{1,2}$ ]] || { echo "invalid SMOKE_ROUNDS"; exit 1; }'
+      - |
+        if [[ "${ANTITHESIS_ENABLED}" == "true" ]]; then
+          [[ "${ANTITHESIS_TENANT}" =~ ^[a-z0-9-]{1,63}$ ]] || { echo "invalid ANTITHESIS_TENANT"; exit 1; }
+          [[ "${ANTITHESIS_WEBHOOK}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || { echo "invalid ANTITHESIS_WEBHOOK"; exit 1; }
+          [[ "${ANTITHESIS_REGISTRY}" =~ ^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ ]] || { echo "invalid ANTITHESIS_REGISTRY"; exit 1; }
+        fi
+      - export IMAGE_TAG="b${CODEBUILD_BUILD_NUMBER}-$(date -u +%Y%m%d%H%M%S)"
+      - echo "IMAGE_TAG=${IMAGE_TAG} BANK_BUG_MODE=${BANK_BUG_MODE} ANTITHESIS_ENABLED=${ANTITHESIS_ENABLED}"
+      - aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+  build:
+    commands:
+      - set -euo pipefail
+      - docker build --platform linux/amd64 --pull -t "${ECR_REGISTRY}/antithesis-bank:${IMAGE_TAG}" sut/bank
+      - docker build --platform linux/amd64 --pull -t "${ECR_REGISTRY}/antithesis-workload:${IMAGE_TAG}" sut/workload
+      # Free pre-verification: run the Test Composer commands locally and judge
+      # the SDK assertions. A planted-bug build is expected to FAIL here.
+      - >-
+        IMAGE_REGISTRY="${ECR_REGISTRY}" IMAGE_TAG="${IMAGE_TAG}" BANK_BUG_MODE="${BANK_BUG_MODE}"
+        ROUNDS="${SMOKE_ROUNDS}" SKIP_BUILD=1 OUTPUT_DIR="${CODEBUILD_SRC_DIR}/smoke-output"
+        bash scripts/local-smoke.sh
+      # The config image's .env must name the registry Antithesis will pull from.
+      - |
+        set -euo pipefail
+        if [[ "${ANTITHESIS_ENABLED}" == "true" ]]; then TARGET_REGISTRY="${ANTITHESIS_REGISTRY}"; else TARGET_REGISTRY="${ECR_REGISTRY}"; fi
+        printf 'IMAGE_REGISTRY=%s\nIMAGE_TAG=%s\nBANK_BUG_MODE=%s\n' "${TARGET_REGISTRY}" "${IMAGE_TAG}" "${BANK_BUG_MODE}" > sut/config/.env
+        cat sut/config/.env
+      - docker build --platform linux/amd64 -t "${ECR_REGISTRY}/antithesis-config:${IMAGE_TAG}" sut/config
+
+  post_build:
+    commands:
+      - set -euo pipefail
+      - '[[ "${CODEBUILD_BUILD_SUCCEEDING}" == "1" ]] || { echo "build failed; nothing is pushed"; false; }'
+      - for img in bank workload config; do docker push "${ECR_REGISTRY}/antithesis-${img}:${IMAGE_TAG}"; done
+      - |
+        if [[ "${ANTITHESIS_ENABLED}" != "true" ]]; then
+          echo "ANTITHESIS_ENABLED=false: images pushed to ECR only (local verification mode)."
+        fi
+      # Antithesis hand-off, in a subshell so trap/umask stay scoped to it.
+      - |
+        if [[ "${ANTITHESIS_ENABLED}" == "true" ]]; then (
+        set -euo pipefail
+        umask 077
+        SECRET_DIR="$(mktemp -d)"
+        trap 'rm -rf "${SECRET_DIR}"; docker logout "${ANTITHESIS_REGISTRY%%/*}" >/dev/null 2>&1 || true' EXIT
+
+        # Credentials are fetched only now, after all untrusted build steps ran.
+        aws secretsmanager get-secret-value --secret-id "${ANTITHESIS_REGISTRY_KEY_SECRET_ARN}" \
+          --query SecretString --output text > "${SECRET_DIR}/key.json"
+        docker login --username _json_key --password-stdin "https://${ANTITHESIS_REGISTRY%%/*}" < "${SECRET_DIR}/key.json"
+        rm -f "${SECRET_DIR}/key.json"
+
+        for img in bank workload config; do
+          docker tag "${ECR_REGISTRY}/antithesis-${img}:${IMAGE_TAG}" "${ANTITHESIS_REGISTRY}/antithesis-${img}:${IMAGE_TAG}"
+          docker push "${ANTITHESIS_REGISTRY}/antithesis-${img}:${IMAGE_TAG}"
+        done
+
+        API_KEY="$(aws secretsmanager get-secret-value --secret-id "${ANTITHESIS_API_KEY_SECRET_ARN}" --query SecretString --output text)"
+        # Header file keeps the key out of the process list (curl argv).
+        printf 'Authorization: Bearer %s\n' "${API_KEY}" > "${SECRET_DIR}/auth.header"
+        unset API_KEY
+
+        # Build the JSON body with python so no value can break the JSON.
+        python3 - > "${SECRET_DIR}/body.json" <<'PY'
+        import json, os
+        reg, tag = os.environ["ANTITHESIS_REGISTRY"], os.environ["IMAGE_TAG"]
+        params = {
+            "antithesis.description": f"bank ledger {tag} (bug_mode={os.environ['BANK_BUG_MODE']})",
+            "antithesis.duration": os.environ["ANTITHESIS_DURATION_MINUTES"],
+            "antithesis.config_image": f"{reg}/antithesis-config:{tag}",
+            "antithesis.images": ";".join(f"{reg}/antithesis-{i}:{tag}" for i in ("bank", "workload")),
+            "antithesis.source": os.environ.get("SOURCE_LABEL", "aws-codebuild"),
+            "run.caller_name": "aws-codebuild",
+            "custom.bug_mode": os.environ["BANK_BUG_MODE"],
+            "custom.codebuild_build_id": os.environ["CODEBUILD_BUILD_ID"],
+        }
+        if os.environ.get("ANTITHESIS_RECIPIENTS"):
+            params["antithesis.report.recipients"] = os.environ["ANTITHESIS_RECIPIENTS"]
+        print(json.dumps({"params": params}))
+        PY
+        curl --silent --show-error --fail-with-body --proto '=https' --tlsv1.2 --max-time 60 \
+          -X POST -H "Content-Type: application/json" -H @"${SECRET_DIR}/auth.header" \
+          --data-binary @"${SECRET_DIR}/body.json" \
+          "https://${ANTITHESIS_TENANT}.antithesis.com/api/v1/launch_experiment/${ANTITHESIS_WEBHOOK}"
+        echo
+        echo "Antithesis run launched; the triage report is e-mailed / shown in the Antithesis UI."
+        ); fi

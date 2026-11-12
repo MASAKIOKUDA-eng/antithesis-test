@@ -1,0 +1,49 @@
+# Manually start the AWS verification build (and, if the stack was deployed
+# with antithesisEnabled=true, an Antithesis run).
+#
+# Repository variables (Settings > Secrets and variables > Actions > Variables):
+#   AWS_ROLE_ARN   output GitHubActionsRoleArn (deploy with -c githubRepository=owner/repo)
+#   AWS_REGION     e.g. ap-northeast-1
+#   SOURCE_BUCKET  output SourceBucketName
+#   PROJECT_NAME   output ProjectName
+# No long-lived AWS keys or Antithesis secrets are stored in GitHub.
+name: antithesis-run
+
+on:
+  workflow_dispatch:
+    inputs:
+      bug_mode:
+        description: Planted bug
+        type: choice
+        options: [none, non_atomic_transfer]
+        default: none
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: antithesis-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: antithesis-run-${{ github.run_id }}
+      - name: start build
+        env:
+          BANK_BUG_MODE: ${{ inputs.bug_mode }}
+          SOURCE_BUCKET: ${{ vars.SOURCE_BUCKET }}
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          WAIT: "1"
+        run: ./scripts/start-run.sh

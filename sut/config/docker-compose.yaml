@@ -1,0 +1,41 @@
+# Topology submitted to Antithesis (packaged into the "config image").
+# Antithesis runs this with no Internet access, so every image must be
+# pre-built and pushed; nothing is pulled from public registries at run time.
+name: antithesis-bank
+
+services:
+  bank:
+    image: ${IMAGE_REGISTRY:-local}/antithesis-bank:${IMAGE_TAG:-dev}
+    platform: linux/amd64
+    container_name: bank
+    hostname: bank
+    environment:
+      BANK_BUG_MODE: ${BANK_BUG_MODE:-none}
+    volumes:
+      - bank-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  workload:
+    image: ${IMAGE_REGISTRY:-local}/antithesis-workload:${IMAGE_TAG:-dev}
+    platform: linux/amd64
+    container_name: workload
+    hostname: workload
+    environment:
+      BANK_URL: http://bank:8080
+      NUM_ACCOUNTS: "5"
+      INITIAL_BALANCE: "100"
+      TRANSFERS_PER_RUN: "20"
+    depends_on:
+      - bank
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  bank-data: {}

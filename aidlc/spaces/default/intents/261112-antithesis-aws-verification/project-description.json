@@ -1,0 +1,7 @@
+{
+  "request": "アンチテーゼと呼ばれるテストツールを検証するためのIaCを書きたい。実装についてはAI-DLCでお願いします。AWSで構築、cdkdでデプロイでやりたい",
+  "repository": "https://github.com/MASAKIOKUDA-eng/antithesis-test",
+  "documentation": "https://antithesis.com/",
+  "attachments": ["Antithesis（アンチテーゼ）解説 (2026-11-12, @MasakiOkuda)"],
+  "standing_preference": "開発時は脆弱性対策を最優先にする"
+}
